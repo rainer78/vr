@@ -4,20 +4,22 @@
   <meta charset="utf-8" />
   <title>VR Game Hub • Tic Tac Throw (AI) • Connect 4 (AI) • Cornhole</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Polyfill (keep this above the import map) -->
+<script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.min.js" crossorigin="anonymous"></script>
 
-  <!-- Polyfill must load before the import map -->
-  <script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.min.js" crossorigin="anonymous"></script>
-
-  <!-- Import map -->  
-  <script type="importmap">
+<script type="importmap">
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-    "troika-three-text": "https://cdn.jsdelivr.net/npm/troika-three-text@0.49.1/dist/troika-three-text.esm.js"
+
+    "troika-three-text": "https://cdn.jsdelivr.net/npm/troika-three-text@0.49.1/dist/troika-three-text.esm.js",
+    "troika-three-utils": "https://cdn.jsdelivr.net/npm/troika-three-utils@0.49.1/dist/troika-three-utils.esm.js",
+    "troika-worker-utils": "https://cdn.jsdelivr.net/npm/troika-worker-utils@0.49.1/dist/troika-worker-utils.esm.js"
   }
 }
 </script>
+
   <style>
     html, body { height:100%; margin:0; }
     body { background:#0b1020; overflow:hidden; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial; }
