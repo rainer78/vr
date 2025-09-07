@@ -85,34 +85,45 @@
     function attachController(i){
       const ctrl = renderer.xr.getController(i);
 
-      // visible ray
-      const ray = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(0,0,0),
-          new THREE.Vector3(0,0,-1)
-        ]),
-        new THREE.LineBasicMaterial({ color:0xffffff })
-      );
-      ray.scale.z = 5;
-      ctrl.add(ray);
-      scene.add(ctrl);
+    // visible ray (longer + slightly thicker)
+const ray = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0,0,0),
+    new THREE.Vector3(0,0,-1)
+  ]),
+  new THREE.LineBasicMaterial({ color:0xffffff, linewidth: 2 })
+);
+ray.scale.z = 8; // longer reach for easier aiming
+ctrl.add(ray);
+scene.add(ctrl);
 
       // model
       const grip = renderer.xr.getControllerGrip(i);
       grip.add(controllerModelFactory.createControllerModel(grip));
       scene.add(grip);
 
-      // trigger events (use both for reliability)
-      const onSelect = ()=>{
-        ctrl.getWorldPosition(tmpA);
-        ctrl.getWorldDirection(tmpB);
-        if (!tryClick(tmpA,tmpB)) {
-          const maybe = activeRoot && activeRoot.userData?.onSelect;
-          if (typeof maybe === 'function') maybe(ctrl, tmpA, tmpB);
-        }
-      };
-      ctrl.addEventListener('select', onSelect);
-      ctrl.addEventListener('selectstart', onSelect);
+      // trigger events
+const onSelect = ()=>{
+  ctrl.getWorldPosition(tmpA);
+  ctrl.getWorldDirection(tmpB);
+  if (!tryClick(tmpA,tmpB)) {
+    const maybe = activeRoot && activeRoot.userData?.onSelect;
+    if (typeof maybe === 'function') maybe(ctrl, tmpA, tmpB);
+  }
+};
+
+let lastSelectAt = 0;
+function onSelectDebounced(){
+  const now = performance.now();
+  if (now - lastSelectAt < 120) return;
+  lastSelectAt = now;
+  onSelect();
+}
+
+// bind only the debounced version
+ctrl.addEventListener('selectstart', onSelectDebounced);
+
+
 
       // grip pass-through for Cornhole
       ctrl.addEventListener('squeezestart', ()=> {
@@ -164,37 +175,71 @@
       tick = null;
     }
 
-    function tryClick(origin, dir){
-      raycaster.set(origin, dir.normalize());
-      const hits = raycaster.intersectObjects([...clickables], true);
-      if (hits.length){
-        const h = hits[0].object;
-        const fn = h.userData.onClick;
-        if (typeof fn === 'function'){ fn(); return true; }
-      }
-      return false;
-    }
+    function findClickable(obj){
+  while (obj && obj !== scene){
+    if (obj.userData && typeof obj.userData.onClick === 'function') return obj;
+    obj = obj.parent;
+  }
+  return null;
+}
 
-    // Hover highlight for cards
-    function hoverUpdate(){
-      const all = [...hoverables];
-      all.forEach(o=> o.parent.userData._hoverCount = 0);
-      controllers.forEach(({ctrl})=>{
-        ctrl.getWorldPosition(tmpA);
-        ctrl.getWorldDirection(tmpB);
-        raycaster.set(tmpA, tmpB.normalize());
-        const hits = raycaster.intersectObjects(all, true);
-        if (hits.length){
-          const obj = hits[0].object;
-          obj.parent.userData._hoverCount = (obj.parent.userData._hoverCount||0) + 1;
-        }
-      });
-      all.forEach(o=>{
-        const g = o.parent;
-        const target = g.userData._hoverCount ? 1.06 : 1.0;
-        g.scale.lerp(new THREE.Vector3(target,target,target), 0.2);
-      });
+// NEW helper here
+function isControllerOrGrip(o){
+  return o === controllers[0]?.ctrl || o === controllers[1]?.ctrl ||
+         o === controllers[0]?.grip || o === controllers[1]?.grip ||
+         (o?.parent ? isControllerOrGrip(o.parent) : false);
+}
+
+function tryClick(origin, dir){
+  raycaster.set(origin, dir.normalize());
+
+  // Look inside the active root first; fallback to whole scene
+  const roots = activeRoot ? [activeRoot] : scene.children;
+  const hits = raycaster.intersectObjects(roots, true);
+
+   // Debug: see what the ray hits
+  console.log('tryClick hits:', hits.map(h => h.object.name || h.object.type));
+
+  for (const h of hits){
+    const target = findClickable(h.object);
+    if (isControllerOrGrip(h.object)) continue; // skip controller and its ray
+    if (target){
+      target.userData.onClick();
+      return true;
     }
+  }
+  return false;
+}
+
+
+   // Hover highlight for cards
+function hoverUpdate(){
+  const all = [...hoverables];
+  all.forEach(o => o.parent.userData._hoverCount = 0);
+
+  controllers.forEach(({ctrl})=>{
+    ctrl.getWorldPosition(tmpA);
+    ctrl.getWorldDirection(tmpB);
+    raycaster.set(tmpA, tmpB.normalize());
+    const hits = raycaster.intersectObjects(all, true);
+
+    if (hits.length){
+      const obj = hits[0].object;
+
+      // 🔍 Debug log
+      console.log('Hovering over:', obj.name || obj.type);
+
+      obj.parent.userData._hoverCount = (obj.parent.userData._hoverCount||0) + 1;
+    }
+  });
+
+  all.forEach(o=>{
+    const g = o.parent;
+    const target = g.userData._hoverCount ? 1.06 : 1.0;
+    g.scale.lerp(new THREE.Vector3(target,target,target), 0.2);
+  });
+}
+
 
     // ---------- Canvas label helper ----------
     function makeLabel(text, { px=64, color='#ffffff', padding=12, bg=null, align='center' } = {}){
@@ -333,66 +378,96 @@
       mesh.renderOrder = 999;
     }
 
-    // ---------- Floating Card builder ----------
-    function buildCard({label, texture, position, onClick}){
-      const group = new THREE.Group();
-      group.position.copy(position);
-      group.userData.phase = Math.random()*Math.PI*2;
+   // ---------- Floating Card builder ----------
+function buildCard({label, texture, position, onClick}){
+  const group = new THREE.Group();
+  group.position.copy(position);
+  group.userData.phase = Math.random() * Math.PI * 2;
 
-      const cardW = 1.2, cardH = 0.75;
+  const cardW = 1.2, cardH = 0.75;
 
-      const frame = new THREE.Mesh(
-        new THREE.PlaneGeometry(cardW+0.04, cardH+0.04),
-        new THREE.MeshStandardMaterial({ color:0x111827, roughness:0.9, metalness:0.0 })
-      );
-      frame.position.z = -0.01;
+  const frame = new THREE.Mesh(
+    new THREE.PlaneGeometry(cardW+0.04, cardH+0.04),
+    new THREE.MeshStandardMaterial({ color:0x111827, roughness:0.9, metalness:0.0 })
+  );
+  frame.position.z = -0.01;
 
-      const img = new THREE.Mesh(
-        new THREE.PlaneGeometry(cardW, cardH),
-        new THREE.MeshStandardMaterial({ map: texture })
-      );
+  const img = new THREE.Mesh(
+    new THREE.PlaneGeometry(cardW, cardH),
+    new THREE.MeshStandardMaterial({ map: texture })
+  );
 
-      const ribbon = new THREE.Mesh(
-        new THREE.PlaneGeometry(cardW, 0.18),
-        new THREE.MeshStandardMaterial({ color:0x1f2937, transparent:true, opacity:0.85 })
-      );
-      ribbon.position.set(0, -cardH/2 + 0.11, 0.01);
+  const ribbon = new THREE.Mesh(
+    new THREE.PlaneGeometry(cardW, 0.18),
+    new THREE.MeshStandardMaterial({ color:0x1f2937, transparent:true, opacity:0.85 })
+  );
+  ribbon.position.set(0, -cardH/2 + 0.11, 0.01);
 
-      const title = makeLabel(label, { px:42, color:'#ffffff' });
-      title.position.set(0, -cardH/2 + 0.11, 0.02);
+  const title = makeLabel(label, { px:42, color:'#ffffff' });
+  title.position.set(0, -cardH/2 + 0.11, 0.02);
 
-      const hit = new THREE.Mesh(
-        new THREE.PlaneGeometry(cardW, cardH),
-        new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 })
-      );
-      elevateHit(hit);
-      hit.userData.onClick = onClick;
+  // Large invisible hit plane (updated)
+const hit = new THREE.Mesh(
+  new THREE.PlaneGeometry(cardW, cardH),
+  new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.0,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: false
+  })
+);
+elevateHit(hit); // keep this
 
-      group.add(frame, img, ribbon, title, hit);
-      clickables.add(hit);
-      hoverables.add(hit);
 
-      group.userData.base = position.clone();
-      return group;
-    }
+  // Attach click handlers at both levels
+  group.userData.onClick = onClick;
+  hit.userData.onClick   = onClick;
 
-    // ---------- Hub button ----------
-    function addHubButton(parent, pos = new THREE.Vector3(0,1.7,-1.2)){
-      const g = new THREE.Group();
-      g.position.copy(pos);
+  group.add(frame, img, ribbon, title, hit);
+  clickables.add(hit);     // still needed for hover highlight
+  hoverables.add(hit);
 
-      const btn = new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.16), new THREE.MeshStandardMaterial({ color:0x374151 }));
-      const lbl = makeLabel('Hub', { px:48, color:'#ffffff' }); lbl.position.set(0,0,0.01);
+  group.userData.base = position.clone();
+  return group;
+}
 
-      const hit = new THREE.Mesh(new THREE.PlaneGeometry(0.38,0.18), new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 }));
-      elevateHit(hit);
-      hit.userData.onClick = ()=> buildHub();
+  // ---------- Hub button ----------
+function addHubButton(parent, pos = new THREE.Vector3(0,1.7,-1.2)){
+  const g = new THREE.Group();
+  g.position.copy(pos);
 
-      g.add(btn, lbl, hit);
-      parent.add(g);
-      clickables.add(hit);
-    }
+  const btn = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.36,0.16),
+    new THREE.MeshStandardMaterial({ color:0x374151 })
+  );
 
+  const lbl = makeLabel('Hub', { px:48, color:'#ffffff' });
+  lbl.position.set(0,0,0.01);
+
+  const hit = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.38, 0.18),
+  new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.0,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: false
+  })
+);
+elevateHit(hit);
+
+
+  const goHub = ()=> buildHub();
+  g.userData.onClick = goHub;   // parent-level handler
+  hit.userData.onClick = goHub; // hit mesh handler
+
+  g.add(btn, lbl, hit);
+  parent.add(g);
+  clickables.add(hit);
+}
+
+   
     // ---------- HUB (3 floating cards) ----------
     function buildHub(){
       clearActive();
@@ -441,601 +516,876 @@
     }
 
     // ---------- Game 1: Tic Tac Throw (AI) ----------
-    function startTTTAI(){
-      clearActive();
-      const root = activeRoot = new THREE.Group();
-      scene.add(root);
+function startTTTAI(){
+  clearActive();
+  const root = activeRoot = new THREE.Group();
+  scene.add(root);
 
-      const boardCenter = new THREE.Vector3(0,1.2,-1.2);
-      const boardSize = 1.8;
-      const cellSize = boardSize/3;
-      const boardZ = boardCenter.z;
+  // ----- Board constants
+  const boardCenter = new THREE.Vector3(0,1.2,-1.2);
+  const boardSize = 1.8;
+  const cellSize  = boardSize/3;
 
-      const board = new THREE.Group();
-      board.position.copy(boardCenter);
-      root.add(board);
+  // ----- Board group
+  const board = new THREE.Group();
+  board.position.copy(boardCenter);
+  root.add(board);
 
-      board.add(new THREE.Mesh(new THREE.PlaneGeometry(boardSize+0.06, boardSize+0.06), new THREE.MeshStandardMaterial({ color:0x1f2937 })));
+  // Frame
+  const frameMat = new THREE.MeshStandardMaterial({ color:0x1f2937 });
+  board.add(new THREE.Mesh(
+    new THREE.PlaneGeometry(boardSize+0.06, boardSize+0.06),
+    frameMat
+  ));
 
-      const grid = new THREE.Group();
-      const lineMat = new THREE.MeshBasicMaterial({ color: 0x6b7280 });
-      const lineW = 0.02;
-      for (let i=1;i<=2;i++){
-        const v = new THREE.Mesh(new THREE.PlaneGeometry(lineW, boardSize), lineMat);
-        v.position.set(-boardSize/2 + i*cellSize, 0, 0.001);
-        const h = new THREE.Mesh(new THREE.PlaneGeometry(boardSize, lineW), lineMat);
-        h.position.set(0, -boardSize/2 + i*cellSize, 0.001);
-        grid.add(v,h);
+  // Grid lines
+  const grid = new THREE.Group();
+  const lineMat = new THREE.MeshBasicMaterial({ color: 0x6b7280 });
+  const lineW = 0.02;
+  for (let i=1;i<=2;i++){
+    const v = new THREE.Mesh(new THREE.PlaneGeometry(lineW, boardSize), lineMat);
+    v.position.set(-boardSize/2 + i*cellSize, 0, 0.001);
+    const h = new THREE.Mesh(new THREE.PlaneGeometry(boardSize, lineW), lineMat);
+    h.position.set(0, -boardSize/2 + i*cellSize, 0.001);
+    grid.add(v,h);
+  }
+  board.add(grid);
+
+  // Cell centers in board-local space
+  const cellCenters = [];
+  for (let r=0;r<3;r++) for (let c=0;c<3;c++){
+    const cx = -boardSize/2 + c*cellSize + cellSize/2;
+    const cy = -boardSize/2 + r*cellSize + cellSize/2;
+    cellCenters.push(new THREE.Vector2(cx,cy));
+  }
+
+  // Invisible pick plane for robust raycasting
+  const pickMat = new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0, side:THREE.DoubleSide });
+  const pickPlane = new THREE.Mesh(new THREE.PlaneGeometry(boardSize, boardSize), pickMat);
+  pickPlane.position.set(0,0,0.0005);
+  pickPlane.name = 'tictactoe-pick';
+  board.add(pickPlane);
+
+  // Game state
+  const EMPTY=0, X=1, O=2;
+  const wins = [
+    [0,1,2],[3,4,5],[6,7,8],
+    [0,3,6],[1,4,7],[2,5,8],
+    [0,4,8],[2,4,6]
+  ];
+
+  let gridState = Array(9).fill(EMPTY);
+  let current = X;
+  let aiThinking = false;
+  let gameOver = false;
+  let winLine = null;
+
+  // Status label
+  const status3D = makeLabel('Tic Tac Throw vs AI. You are X.', { px:56, color:'#ffffff' });
+  status3D.position.set(0, 1.65, -1.2);
+  root.add(status3D);
+  const setStatus3D = t => status3D.userData.setText(t);
+
+  // Piece factories
+  const xGeom = new THREE.BoxGeometry(0.45,0.08,0.06);
+  const xMat  = new THREE.MeshStandardMaterial({ color:0x60a5fa });
+  function makeX(){
+    const g = new THREE.Group();
+    const a = new THREE.Mesh(xGeom,xMat), b = new THREE.Mesh(xGeom,xMat);
+    a.rotation.z = Math.PI/4; b.rotation.z = -Math.PI/4;
+    g.add(a,b); g.userData.isPiece=true; return g;
+  }
+  const oGeom = new THREE.TorusGeometry(0.23,0.06,16,48);
+  const oMat  = new THREE.MeshStandardMaterial({ color:0x34d399 });
+  function makeO(){
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(oGeom,oMat));
+    g.userData.isPiece=true; return g;
+  }
+
+  // Clean strike-through line
+  function drawWin(w){
+    if (winLine) { board.remove(winLine); winLine.geometry.dispose(); winLine.material.dispose(); winLine = null; }
+    const aIdx = w[0], cIdx = w[2];
+    const a = cellCenters[aIdx], c = cellCenters[cIdx];
+    const A = new THREE.Vector3(a.x, a.y, 0.012);
+    const C = new THREE.Vector3(c.x, c.y, 0.012);
+    const dir = new THREE.Vector3().subVectors(C, A).normalize();
+    const ext = cellSize * 0.35;
+    const start = A.clone().addScaledVector(dir, -ext);
+    const end   = C.clone().addScaledVector(dir,  ext);
+    const g = new THREE.BufferGeometry().setFromPoints([start, end]);
+    winLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color:0xfbbf24 }));
+    board.add(winLine);
+  }
+
+  function checkEnd(){
+    for (const w of wins){
+      const [a,b,c] = w;
+      if (gridState[a] && gridState[a]===gridState[b] && gridState[b]===gridState[c]){
+        drawWin(w);
+        gameOver = true;
+        setStatus3D(`Winner: ${gridState[a]===X ? 'You' : 'AI'}`);
+        hapticBoth(0.8,180);
+        return true;
       }
-      board.add(grid);
+    }
+    if (!gridState.includes(EMPTY)){
+      gameOver = true;
+      setStatus3D('Draw');
+      return true;
+    }
+    return false;
+  }
 
-      const cellCenters = [];
-      for (let r=0;r<3;r++) for (let c=0;c<3;c++){
-        const cx = -boardSize/2 + c*cellSize + cellSize/2;
-        const cy = -boardSize/2 + r*cellSize + cellSize/2;
-        cellCenters.push(new THREE.Vector2(cx,cy));
+  function placeAnimated(idx, who, from, done){
+    const center = cellCenters[idx];
+
+    // World-space animation target that honors board translation, rotation, and scale
+    const target = board.localToWorld(new THREE.Vector3(center.x, center.y, 0.03));
+
+    const piece = who===X ? makeX() : makeO();
+    scene.add(piece);
+    const start = performance.now(), dur = 220;
+    const startPos = from.clone();
+    const endRot = who===X ? Math.PI*2 : Math.PI;
+
+    function anim(now){
+      const t = Math.min(1,(now-start)/dur);
+      const e = 1 - Math.pow(1-t,3);
+      piece.position.lerpVectors(startPos,target,e);
+      piece.rotation.z = endRot*e;
+      if (t<1) requestAnimationFrame(anim);
+      else {
+        scene.remove(piece); board.add(piece);
+        piece.position.set(center.x,center.y,0.03); // board-local placement
+        piece.rotation.z = endRot;
+        gridState[idx]=who;
+        done && done();
       }
+    }
+    requestAnimationFrame(anim);
+  }
 
-      const EMPTY=0, X=1, O=2;
-      let gridState = Array(9).fill(EMPTY);
-      let current = X;
-      let aiThinking = false;
-      let gameOver = false;
-      let winLine = null;
+  // Robust picking with a Raycaster against the invisible pick plane
+  const raycaster = new THREE.Raycaster();
+  function humanAttempt(controllerObj){
+    if (gameOver || aiThinking || current!==X) return;
 
-      const status3D = makeLabel('Tic Tac Throw vs AI. You are X.', { px:56, color:'#ffffff' });
-      status3D.position.set(0, 1.65, -1.2);
-      root.add(status3D);
-      const setStatus3D = t => status3D.userData.setText(t);
+    const origin = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    controllerObj.getWorldPosition(origin);
+    controllerObj.getWorldDirection(dir);
 
-      const wins = [
-        [0,1,2],[3,4,5],[6,7,8],
-        [0,3,6],[1,4,7],[2,5,8],
-        [0,4,8],[2,4,6]
-      ];
-
-      function drawWin(w){
-        if (winLine) board.remove(winLine);
-        const pts = w.map(i=> new THREE.Vector3(cellCenters[i].x, cellCenters[i].y, 0.01));
-        const g = new THREE.BufferGeometry().setFromPoints(pts);
-        winLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color:0xfbbf24 }));
-        board.add(winLine);
-      }
-
-      function checkEnd(){
-        for (const w of wins){
-          const [a,b,c] = w;
-          if (gridState[a] && gridState[a]===gridState[b] && gridState[b]===gridState[c]){
-            drawWin(w);
-            gameOver = true;
-            setStatus3D(`Winner: ${gridState[a]===X ? 'You' : 'AI'}`);
-            hapticBoth(0.8,180);
-            return true;
-          }
-        }
-        if (!gridState.includes(EMPTY)){
-          gameOver = true;
-          setStatus3D('Draw');
-          return true;
-        }
-        return false;
-      }
-
-      function makeX(){
-        const g = new THREE.Group();
-        const bar = new THREE.BoxGeometry(0.45,0.08,0.06);
-        const m = new THREE.MeshStandardMaterial({ color:0x60a5fa });
-        const a = new THREE.Mesh(bar,m), b = new THREE.Mesh(bar,m);
-        a.rotation.z = Math.PI/4; b.rotation.z = -Math.PI/4;
-        g.add(a,b); g.userData.isPiece=true; return g;
-      }
-      function makeO(){
-        const g = new THREE.Group();
-        g.add(new THREE.Mesh(new THREE.TorusGeometry(0.23,0.06,16,48), new THREE.MeshStandardMaterial({ color:0x34d399 })));
-        g.userData.isPiece=true; return g;
-      }
-
-      function placeAnimated(idx, who, from, done){
-        const center = cellCenters[idx];
-        const target = new THREE.Vector3(center.x, center.y, 0.03).add(boardCenter);
-        const piece = who===X ? makeX() : makeO();
-        scene.add(piece);
-        const start = performance.now(), dur = 220;
-        const startPos = from.clone();
-        const endRot = who===X ? Math.PI*2 : Math.PI;
-
-        function anim(now){
-          const t = Math.min(1,(now-start)/dur);
-          const e = 1 - Math.pow(1-t,3);
-          piece.position.lerpVectors(startPos,target,e);
-          piece.rotation.z = endRot*e;
-          if (t<1) requestAnimationFrame(anim);
-          else {
-            scene.remove(piece); board.add(piece);
-            piece.position.set(center.x,center.y,0.03);
-            piece.rotation.z = endRot;
-            gridState[idx]=who;
-            done && done();
-          }
-        }
-        requestAnimationFrame(anim);
-      }
-
-      function humanAttempt(controllerObj){
-        if (gameOver || aiThinking || current!==X) return;
-        const origin = new THREE.Vector3(); const dir = new THREE.Vector3(0,0,-1);
-        controllerObj.getWorldPosition(origin);
-        controllerObj.getWorldDirection(dir);
-        if (Math.abs(dir.z) < 1e-3) { haptic(controllerObj, 0.2, 40); return; }
-        const t = (boardZ - origin.z) / dir.z;
-        if (t <= 0) { haptic(controllerObj, 0.2, 40); return; }
-        const hit = origin.clone().add(dir.clone().multiplyScalar(t));
-        const local = hit.clone().sub(boardCenter);
-        const x = THREE.MathUtils.clamp(local.x, -boardSize/2, boardSize/2);
-        const y = THREE.MathUtils.clamp(local.y, -boardSize/2, boardSize/2);
-        const c = Math.floor((x + boardSize/2) / cellSize);
-        const r = Math.floor((y + boardSize/2) / cellSize);
-        if (c < 0 || c > 2 || r < 0 || r > 2) { haptic(controllerObj, 0.2, 40); return; }
-        const idx = r*3 + c;
-        if (gridState[idx]!==EMPTY){ setStatus3D('Cell occupied. Try another.'); haptic(controllerObj,0.3,60); return; }
-
-        placeAnimated(idx, X, origin, ()=>{
-          if (checkEnd()) return;
-          current = O;
-          setStatus3D('AI thinking…');
-          aiTurn();
-        });
-        haptic(controllerObj, 0.5, 60);
-      }
-
-      function wouldWin(p, i){
-        const prev = gridState[i];
-        gridState[i] = p;
-        const ok = wins.some(([a,b,c])=>gridState[a]===p && gridState[b]===p && gridState[c]===p);
-        gridState[i] = prev;
-        return ok;
-      }
-      function pickBest(cands){
-        let best=cands[0], bestS=-1e9;
-        for (const i of cands){
-          const prev=gridState[i]; gridState[i]=O;
-          let s=0;
-          for (const [a,b,c] of wins){
-            const vals=[a,b,c].map(j=>gridState[j]);
-            const os=vals.filter(v=>v===O).length, xs=vals.filter(v=>v===X).length;
-            if (xs===0 && os===2) s+=3;
-            if (xs===0 && os===1) s+=1;
-          }
-          for (let k=0;k<9;k++){ if (gridState[k]===EMPTY && wouldWin(X,k)) s-=4; }
-          gridState[i]=prev;
-          if (s>bestS){ bestS=s; best=i; }
-        }
-        return best;
-      }
-      function chooseAiMove(){
-        const empties = []; for (let i=0;i<9;i++) if (gridState[i]===EMPTY) empties.push(i);
-        if (!empties.length) return null;
-        for (const i of empties){ if (wouldWin(O,i)) return i; }
-        for (const i of empties){ if (wouldWin(X,i)) return i; }
-        if (gridState[4]===EMPTY) return 4;
-        const corners=[0,2,6,8].filter(i=>gridState[i]===EMPTY);
-        if (corners.length) return pickBest(corners);
-        const edges=[1,3,5,7].filter(i=>gridState[i]===EMPTY);
-        if (edges.length) return pickBest(edges);
-        return empties[0];
-      }
-      function aiTurn(){
-        aiThinking=true;
-        setTimeout(()=>{
-          if (gameOver){ aiThinking=false; return; }
-          const mv = chooseAiMove();
-          if (mv==null){ aiThinking=false; return; }
-          const center = cellCenters[mv];
-          const from = new THREE.Vector3(center.x, center.y, 0.6).add(boardCenter);
-          placeAnimated(mv, O, from, ()=>{
-            if (checkEnd()){ aiThinking=false; return; }
-            current=X; aiThinking=false; setStatus3D('Your turn');
-          });
-        }, 420);
-      }
-
-      function reset(){
-        for (let i=board.children.length-1;i>=0;i--){
-          const o=board.children[i]; if (o.userData?.isPiece) board.remove(o);
-        }
-        gridState.fill(EMPTY); current=X; gameOver=false; aiThinking=false;
-        if (winLine){ board.remove(winLine); winLine=null; }
-        setStatus3D('Tic Tac Throw vs AI. You are X.');
-      }
-
-      const resetBtn = new THREE.Group();
-      const rb = new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.16), new THREE.MeshStandardMaterial({ color:0x374151 }));
-      const rl = makeLabel('Reset', { px:40, color:'#ffffff' }); rl.position.set(0,0,0.01);
-      const rh = new THREE.Mesh(new THREE.PlaneGeometry(0.38,0.18), new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 }));
-      elevateHit(rh);
-      rh.userData.onClick = ()=>{ reset(); hapticBoth(0.5,60); };
-      resetBtn.position.set(0, 0.8, -1.2);
-      resetBtn.add(rb, rl, rh);
-      root.add(resetBtn);
-      clickables.add(rh);
-
-      addHubButton(root, new THREE.Vector3(0,1.95,-1.2));
-
-      setStatus('Tic Tac Throw vs AI. Aim at a cell and press trigger.');
-      setHelp('You are X. AI is O. Reset below the board. Hub returns to menu.');
-
-      // expose selection handler to global listener
-      activeRoot.userData.onSelect = (ctrl)=> humanAttempt(ctrl);
-
-      tick = null;
+    raycaster.set(origin, dir.normalize());
+    const hits = raycaster.intersectObject(pickPlane, false);
+    if (!hits.length){
+      haptic(controllerObj, 0.2, 40);
+      return;
     }
 
-    // ---------- Game 2: Connect 4 (AI) ----------
-    function startC4AI(){
-      clearActive();
-      const root = activeRoot = new THREE.Group();
-      scene.add(root);
+    // Convert hit to board-local space
+    const pLocal = hits[0].point.clone();
+    board.worldToLocal(pLocal);
 
-      const boardCenter = new THREE.Vector3(0,1.25,-1.6);
-      const cols = 7, rows = 6, cell = 0.28;
-      const width = cols*cell, height = rows*cell;
+    // Compute indices without pre-clamping
+    const cx = (pLocal.x + boardSize/2) / cellSize;
+    const cy = (pLocal.y + boardSize/2) / cellSize;
+    const c = Math.floor(cx);
+    const r = Math.floor(cy);
 
-      const frame = new THREE.Mesh(new THREE.PlaneGeometry(width+0.1, height+0.1), new THREE.MeshStandardMaterial({ color:0x1f2937 }));
-      frame.position.copy(boardCenter);
-      root.add(frame);
+    if (c < 0 || c > 2 || r < 0 || r > 2){
+      haptic(controllerObj, 0.2, 40);
+      return;
+    }
+    const idx = r*3 + c;
+    if (gridState[idx]!==EMPTY){
+      setStatus3D('Cell occupied. Try another.');
+      haptic(controllerObj,0.3,60);
+      return;
+    }
 
-      const holeGroup = new THREE.Group();
-      holeGroup.position.copy(boardCenter);
-      const holeMat = new THREE.MeshStandardMaterial({ color:0x374151 });
-      for (let r=0;r<rows;r++) for (let c=0;c<cols;c++){
-        const circ = new THREE.Mesh(new THREE.CircleGeometry((cell*0.4), 24), holeMat);
-        circ.position.set((c - (cols-1)/2)*cell, (r - (rows-1)/2)*cell, 0.01);
-        holeGroup.add(circ);
+    placeAnimated(idx, X, origin, ()=>{
+      if (checkEnd()) return;
+      current = O;
+      setStatus3D('AI thinking…');
+      aiTurn();
+    });
+    haptic(controllerObj, 0.5, 60);
+  }
+
+  // Lightweight AI
+  function wouldWin(p, i){
+    const prev = gridState[i];
+    gridState[i] = p;
+    const ok = wins.some(([a,b,c])=>gridState[a]===p && gridState[b]===p && gridState[c]===p);
+    gridState[i] = prev;
+    return ok;
+  }
+
+  function pickBest(cands){
+    let best=cands[0], bestS=-1e9;
+    for (const i of cands){
+      const prev=gridState[i]; gridState[i]=O;
+      let s=0;
+      for (const [a,b,c] of wins){
+        const vals=[a,b,c].map(j=>gridState[j]);
+        const os=vals.filter(v=>v===O).length, xs=vals.filter(v=>v===X).length;
+        if (xs===0 && os===2) s+=3;
+        if (xs===0 && os===1) s+=1;
       }
-      root.add(holeGroup);
+      for (let k=0;k<9;k++){ if (gridState[k]===EMPTY && wouldWin(X,k)) s-=4; }
+      gridState[i]=prev;
+      if (s>bestS){ bestS=s; best=i; }
+    }
+    return best;
+  }
 
-      const hitMat = new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 });
+  function chooseAiMove(){
+    const empties = []; for (let i=0;i<9;i++) if (gridState[i]===EMPTY) empties.push(i);
+    if (!empties.length) return null;
+    for (const i of empties){ if (wouldWin(O,i)) return i; }
+    for (const i of empties){ if (wouldWin(X,i)) return i; }
+    if (gridState[4]===EMPTY) return 4;
+    const corners=[0,2,6,8].filter(i=>gridState[i]===EMPTY);
+    if (corners.length) return pickBest(corners);
+    const edges=[1,3,5,7].filter(i=>gridState[i]===EMPTY);
+    if (edges.length) return pickBest(edges);
+    return empties[0];
+  }
+
+  function aiTurn(){
+    aiThinking=true;
+    setTimeout(()=>{
+      if (gameOver){ aiThinking=false; return; }
+      const mv = chooseAiMove();
+      if (mv==null){ aiThinking=false; return; }
+      const center = cellCenters[mv];
+
+      // World-space AI start point that honors board transform
+      const from = board.localToWorld(new THREE.Vector3(center.x, center.y, 0.6));
+
+      placeAnimated(mv, O, from, ()=>{
+        if (checkEnd()){ aiThinking=false; return; }
+        current=X; aiThinking=false; setStatus3D('Your turn');
+      });
+    }, 420);
+  }
+
+  function reset(){
+    for (let i=board.children.length-1;i>=0;i--){
+      const o=board.children[i];
+      if (o.userData && o.userData.isPiece) {
+        board.remove(o);
+      }
+    }
+    if (winLine){ board.remove(winLine); winLine.geometry.dispose(); winLine.material.dispose(); winLine=null; }
+    gridState.fill(EMPTY);
+    current=X; gameOver=false; aiThinking=false;
+    setStatus3D('Tic Tac Throw vs AI. You are X.');
+  }
+
+  // UI: Reset
+  const resetBtn = new THREE.Group();
+  const rb = new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.16), new THREE.MeshStandardMaterial({ color:0x374151 }));
+  const rl = makeLabel('Reset', { px:40, color:'#ffffff' }); rl.position.set(0,0,0.01);
+  const rh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.38, 0.18),
+  new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.0,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    depthTest: false
+  })
+);
+elevateHit(rh);
+
+  rh.userData.onClick = ()=>{ reset(); hapticBoth(0.5,60); };
+  resetBtn.position.set(0, 0.8, -1.2);
+  resetBtn.add(rb, rl, rh);
+  root.add(resetBtn);
+  clickables.add(rh);
+
+  addHubButton(root, new THREE.Vector3(0,1.95,-1.2));
+
+  setStatus('Tic Tac Throw vs AI. Aim at a cell and press trigger.');
+  setHelp('You are X. AI is O. Reset below the board. Hub returns to menu.');
+
+  // selection handler
+  activeRoot.userData.onSelect = (ctrl)=> humanAttempt(ctrl);
+
+  tick = null;
+}
+
+
+   // ---------- Game 2: Connect 4 (AI) ----------
+function startC4AI(){
+  clearActive();
+  const root = activeRoot = new THREE.Group();
+  scene.add(root);
+
+  const boardCenter = new THREE.Vector3(0,1.25,-1.6);
+  const cols = 7, rows = 6, cell = 0.28;
+  const width = cols*cell, height = rows*cell;
+
+  const frame = new THREE.Mesh(
+    new THREE.PlaneGeometry(width+0.1, height+0.1),
+    new THREE.MeshStandardMaterial({ color:0x1f2937 })
+  );
+  frame.position.copy(boardCenter);
+  root.add(frame);
+
+  // board holes
+  const holeGroup = new THREE.Group();
+  holeGroup.position.copy(boardCenter);
+  const holeMat = new THREE.MeshStandardMaterial({ color:0x374151 });
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const circ = new THREE.Mesh(new THREE.CircleGeometry((cell*0.4), 24), holeMat);
+      circ.position.set((c - (cols-1)/2)*cell, (r - (rows-1)/2)*cell, 0.01);
+      holeGroup.add(circ);
+    }
+  }
+  root.add(holeGroup);
+
+  // hit columns (fixed: bind column on mesh, not via closure)
+  const hitMat = new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 });
+
+  function makeHitForColumn(col){
+    const hit = new THREE.Mesh(new THREE.PlaneGeometry(cell, height+0.1), hitMat.clone());
+    elevateHit(hit);
+    hit.position.set(boardCenter.x + (col - (cols-1)/2)*cell, boardCenter.y, boardCenter.z+0.02);
+    hit.userData.col = col;
+    hit.userData.onClick = function(){ humanPlay(this.userData.col|0); };
+    root.add(hit);
+    clickables.add(hit);
+    return hit;
+  }
+
+  for (let c=0;c<cols;c++) makeHitForColumn(c);
+
+  const EMPTY=0, HUMAN=1, AI=2;
+  let grid = Array(rows*cols).fill(EMPTY);
+  let current = HUMAN;
+  let gameOver = false;
+  let aiThinking = false;
+
+  const status3D = makeLabel('Connect 4 vs AI. You are Red. Your turn.', { px:56, color:'#ffffff' });
+  status3D.position.set(0, 1.8, -1.4);
+  root.add(status3D);
+  const setStatus3D = t => status3D.userData.setText(t);
+
+  const chipGroup = new THREE.Group();
+  root.add(chipGroup);
+
+  const idx = (r,c)=> r*cols + c;
+  const inBounds = (r,c)=> r>=0 && r<rows && c>=0 && c<cols;
+  const copyGrid = g => g.slice();
+  function lowestEmptyRow(g,c){
+    for (let r=0;r<rows;r++) if (g[idx(r,c)]===EMPTY) return r;
+    return -1;
+  }
+
+  function makeChip(p){
+    const color = p===HUMAN ? 0xef4444 : 0xf59e0b;
+    const m = new THREE.MeshStandardMaterial({ color });
+    const g = new THREE.Mesh(new THREE.CylinderGeometry(cell*0.42, cell*0.42, 0.06, 24), m);
+    g.rotation.x = Math.PI/2;
+    g.userData.isChip = true;
+    return g;
+  }
+
+  function animDrop(r, c, who, onDone){
+    const chip = makeChip(who);
+    const start = new THREE.Vector3(
+      boardCenter.x + (c - (cols-1)/2)*cell,
+      boardCenter.y + (rows/2 + 0.8)*cell,
+      boardCenter.z+0.03
+    );
+    const end   = new THREE.Vector3(
+      start.x,
+      boardCenter.y + (r - (rows-1)/2)*cell,
+      start.z
+    );
+    chip.position.copy(start);
+    chipGroup.add(chip);
+    const t0=performance.now(), dur=350;
+    function anim(now){
+      const t = Math.min(1,(now-t0)/dur);
+      const e = 1 - Math.pow(1-t,3);
+      chip.position.lerpVectors(start,end,e);
+      if (t<1) requestAnimationFrame(anim);
+      else { onDone && onDone(chip); }
+    }
+    requestAnimationFrame(anim);
+    hapticBoth(0.4,60);
+  }
+
+  function checkFrom(g,r,c,p){
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for (const [dr,dc] of dirs){
+      const cells = [[r,c]];
+      let rr=r+dr, cc=c+dc;
+      while (inBounds(rr,cc) && g[idx(rr,cc)]===p){ cells.push([rr,cc]); rr+=dr; cc+=dc; }
+      rr=r-dr; cc=c-dc;
+      while (inBounds(rr,cc) && g[idx(rr,cc)]===p){ cells.unshift([rr,cc]); rr-=dr; cc-=dc; }
+      if (cells.length>=4) return cells.slice(0,4);
+    }
+    return null;
+  }
+
+  function checkAnyWin(g){
+    for (let r=0;r<rows;r++){
       for (let c=0;c<cols;c++){
-        const hit = new THREE.Mesh(new THREE.PlaneGeometry(cell, height+0.1), hitMat.clone());
-        elevateHit(hit);
-        hit.position.set(boardCenter.x + (c - (cols-1)/2)*cell, boardCenter.y, boardCenter.z+0.02);
-        hit.userData.col = c;
-        hit.userData.onClick = ()=> humanPlay(c);
-        root.add(hit);
-        clickables.add(hit);
+        const p = g[idx(r,c)];
+        if (p===EMPTY) continue;
+        const w = checkFrom(g,r,c,p);
+        if (w) return {player:p, cells:w};
+      }
+    }
+    return null;
+  }
+
+  function drawWinRings(cells){
+    const g = new THREE.Group();
+    cells.forEach(([r,c])=>{
+      const h = new THREE.Mesh(
+        new THREE.RingGeometry(cell*0.46, cell*0.5, 24),
+        new THREE.MeshBasicMaterial({ color:0xfbbf24 })
+      );
+      h.position.set(
+        boardCenter.x + (c - (cols-1)/2)*cell,
+        boardCenter.y + (r - (rows-1)/2)*cell,
+        boardCenter.z+0.04
+      );
+      g.add(h);
+    });
+    root.add(g);
+  }
+
+  function checkEnd(g){
+    const result = checkAnyWin(g);
+    if (result){
+      drawWinRings(result.cells);
+      setStatus3D(`Winner: ${result.player===HUMAN ? 'You' : 'AI'}`);
+      gameOver = true; hapticBoth(0.8,180);
+      return true;
+    }
+    if (!g.includes(EMPTY)){
+      setStatus3D('Draw');
+      gameOver = true;
+      return true;
+    }
+    return false;
+  }
+
+  // fixed: claim the turn before anim to prevent double taps
+  function humanPlay(c){
+    if (gameOver || aiThinking || current !== HUMAN) return;
+    c = c|0;
+    const r = lowestEmptyRow(grid, c);
+    if (r < 0){
+      setStatus3D('Column full. Choose another.');
+      return;
+    }
+    current = AI; // claim immediately
+    animDrop(r, c, HUMAN, ()=>{
+      grid[idx(r,c)] = HUMAN;
+      if (checkEnd(grid)) return;
+      setStatus3D('AI thinking...');
+      aiTurn();
+    });
+  }
+
+  function legalMoves(g){
+    const ms=[];
+    for (let c=0;c<cols;c++) if (lowestEmptyRow(g,c)>=0) ms.push(c);
+    return ms;
+  }
+
+  function patternScore(g, player){
+    let total = 0;
+    function windowScore(r0,c0,dr,dc){
+      let p=0, h=0;
+      for (let k=0;k<4;k++){
+        const r=r0+dr*k, c=c0+dc*k;
+        const v = g[idx(r,c)];
+        if (v===player) p++;
+        else if (v===EMPTY) h++;
+        else return 0;
+      }
+      if (p===3 && h===1) return 50;
+      if (p===2 && h===2) return 10;
+      if (p===1 && h===3) return 2;
+      return 0;
+    }
+    for (let r=0;r<rows;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,0,1);
+    for (let c=0;c<cols;c++) for (let r=0;r<=rows-4;r++) total += windowScore(r,c,1,0);
+    for (let r=0;r<=rows-4;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,1,1);
+    for (let r=3;r<rows;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,-1,1);
+    return total;
+  }
+
+  function evaluateMove(g, c, depth){
+    const r = lowestEmptyRow(g,c); if (r<0) return -1e9;
+    const g2 = copyGrid(g); g2[idx(r,c)] = AI;
+    const winNow = checkAnyWin(g2);
+    if (winNow && winNow.player===AI) return 1e6;
+    let score = patternScore(g2, AI) - 0.9*patternScore(g2, HUMAN);
+    const centerBias = [3,2,4,1,5,0,6];
+    score += (6 - centerBias.indexOf(c)) * 8;
+    if (depth > 0){
+      let worst = 1e9;
+      for (const c2 of legalMoves(g2)){
+        const r2 = lowestEmptyRow(g2,c2);
+        const g3 = copyGrid(g2); g3[idx(r2,c2)] = HUMAN;
+        const w = checkAnyWin(g3);
+        const sc = w && w.player===HUMAN ? -1e6 : (patternScore(g3, AI) - patternScore(g3, HUMAN));
+        worst = Math.min(worst, sc);
+      }
+      score += 0.6 * worst;
+    }
+    return score;
+  }
+
+  function chooseAiMove(g){
+    const moves = legalMoves(g);
+    if (moves.length===0) return null;
+
+    // win now
+    for (const c of moves){
+      const r = lowestEmptyRow(g,c); const g2 = copyGrid(g); g2[idx(r,c)] = AI;
+      if (checkAnyWin(g2)?.player===AI) return c;
+    }
+    // block human
+    for (const c of moves){
+      const r = lowestEmptyRow(g,c); const g2 = copyGrid(g); g2[idx(r,c)] = HUMAN;
+      if (checkAnyWin(g2)?.player===HUMAN) return c;
+    }
+    // evaluate
+    let bestC = moves[0], bestS = -1e9;
+    for (const c of moves){
+      const s = evaluateMove(g,c,2);
+      if (s > bestS){ bestS = s; bestC = c; }
+    }
+    return bestC;
+  }
+
+  function aiTurn(){
+    aiThinking = true;
+    setTimeout(()=>{
+      if (gameOver){ aiThinking=false; return; }
+      const c = chooseAiMove(grid);
+      if (c==null){ aiThinking=false; return; }
+      const r = lowestEmptyRow(grid, c);
+      if (r < 0){ aiThinking=false; current=HUMAN; setStatus3D('Your turn.'); return; } // safety for stale columns
+      animDrop(r, c, AI, ()=>{
+        grid[idx(r,c)] = AI;
+        if (checkEnd(grid)){ aiThinking=false; return; }
+        current=HUMAN; aiThinking=false; setStatus3D('Your turn.');
+      });
+    }, 450);
+  }
+
+  // Reset + Hub
+  const resetBtn = new THREE.Group();
+  const rb = new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.16), new THREE.MeshStandardMaterial({ color:0x374151 }));
+  const rl = makeLabel('Reset', { px:40, color:'#ffffff' }); rl.position.set(0,0,0.01);
+  const rh = new THREE.Mesh(new THREE.PlaneGeometry(0.38,0.18), new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 }));
+  elevateHit(rh);
+  rh.userData.onClick = ()=>{
+    grid.fill(EMPTY);
+    chipGroup.clear();
+    gameOver=false;
+    current=HUMAN;
+    aiThinking=false;
+    setStatus3D('Connect 4 vs AI. You are Red. Your turn.');
+  };
+  resetBtn.position.set(0, 2.05, -1.4);
+  resetBtn.add(rb, rl, rh);
+  root.add(resetBtn);
+  clickables.add(rh);
+
+  addHubButton(root, new THREE.Vector3(0, 2.25, -1.4));
+
+  setStatus('Connect 4 vs AI. Red is human, Yellow is AI.');
+  setHelp('Point at a column and press trigger. Four in a row wins.');
+
+  tick = null;
+}
+
+
+// ---------- Game 3: Cornhole (revised) ----------
+function startCornhole(){
+  clearActive();
+  const root = activeRoot = new THREE.Group();
+  scene.add(root);
+
+  setStatus('Cornhole. Toss bags with the trigger.');
+  setHelp('Aim the controller. Hold grip to charge; release to throw. Ten bags total. 3 points in hole, 1 point on board.');
+
+  // Board dimensions (meters)
+  const boardW = 1.1;
+  const boardH = 0.05;  // thickness
+  const boardL = 2.2;
+  const inclineRise = 0.5; // rise across length to tilt
+
+  // Physics coefficients
+  const RESTITUTION_BOARD = 0.25;  // bounce on board
+  const FRICTION_BOARD    = 0.45;  // sliding friction on board
+  const AIR_DRAG          = 0.015; // mild air drag per second
+  const RESTITUTION_GROUND = 0.25; // bounce on ground
+  const FRICTION_GROUND    = 0.20; // sliding friction on ground
+
+  // Temps
+  const tmpA = new THREE.Vector3();
+  const tmpB = new THREE.Vector3();
+  const tmpC = new THREE.Vector3();
+  const mInv = new THREE.Matrix4();
+  const cam  = (typeof camera !== 'undefined') ? camera : null;
+
+  // Board
+  const boardPos = new THREE.Vector3(0, 0.5, -2.6);
+  const board = new THREE.Mesh(
+    new THREE.BoxGeometry(boardW, boardH, boardL),
+    new THREE.MeshStandardMaterial({ color:0x374151 })
+  );
+  board.position.copy(boardPos);
+  board.rotation.x = -Math.atan2(inclineRise, boardL);
+  root.add(board);
+
+  // Hole (visual). Scoring uses board-local checks.
+  const holeRadius = 0.12;
+  const holeLocal  = new THREE.Vector3(0, 0, -0.6); // local to board center
+  const hole = new THREE.Mesh(
+    new THREE.CylinderGeometry(holeRadius, holeRadius, boardH + 0.02, 32),
+    new THREE.MeshStandardMaterial({ color:0x111827 })
+  );
+  hole.position.copy(board.localToWorld(holeLocal.clone()).add(new THREE.Vector3(0, boardH*0.5, 0)));
+  hole.rotation.copy(board.rotation);
+  root.add(hole);
+
+  // HUD
+  let shots = 10, score = 0;
+  const label = makeLabel(`Bags left: ${shots}   Score: ${score}`, { px:56, color:'#ffffff' });
+  label.position.set(0, 1.8, -1.6);
+  root.add(label);
+  const updateLabel = ()=> label.userData.setText(`Bags left: ${shots}   Score: ${score}`);
+
+  // Bag state
+  const activeBags = [];
+  const gravity = new THREE.Vector3(0,-9.8,0);
+
+  function spawnBag(worldPos, worldDir, power){
+    const bag = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.06, 0.16),
+      new THREE.MeshStandardMaterial({ color:0x2563eb })
+    );
+    bag.position.copy(worldPos);
+    bag.quaternion.identity();
+    root.add(bag);
+
+    const speed = 4.5 + power*3.5;
+    const vel = worldDir.clone().normalize().multiplyScalar(speed);
+    vel.y += 2.2 + power*1.3;
+
+    activeBags.push({ mesh: bag, vel, alive: true });
+  }
+
+  // Throw charge / preview
+  let holding = false;
+  let holdStart = 0;
+  let preview = null;
+  let lastCtrl = null;
+
+  function beginHold(ctrl){
+    if (shots <= 0) return;
+    holding = true;
+    holdStart = performance.now();
+    lastCtrl = ctrl;
+
+    preview = new THREE.Mesh(
+      new THREE.RingGeometry(0.02, 0.03, 24),
+      new THREE.MeshBasicMaterial({ color:0xffffff })
+    );
+    root.add(preview);
+  }
+
+  function endHold(ctrl){
+    if (!holding) return;
+    holding = false;
+
+    if (preview){
+      root.remove(preview);
+      preview.geometry.dispose();
+      preview.material.dispose();
+      preview = null;
+    }
+    if (shots <= 0) return;
+
+    ctrl.getWorldPosition(tmpA);
+    ctrl.getWorldDirection(tmpB);
+    const power = Math.min(1, (performance.now()-holdStart)/1200);
+    spawnBag(tmpA, tmpB, power);
+    shots -= 1; updateLabel();
+    haptic(ctrl, 0.5 + 0.3*power, 90);
+  }
+
+  // Input hooks
+  activeRoot.userData.onSqueezeStart = (ctrl)=> beginHold(ctrl);
+  activeRoot.userData.onSqueezeEnd   = (ctrl)=> endHold(ctrl);
+
+  addHubButton(root, new THREE.Vector3(0, 2.05, -1.6));
+
+  // Board frame cache per tick
+  const boardNormal = new THREE.Vector3(0,1,0);
+  function updateBoardFrame(){
+    boardNormal.set(0,1,0).applyQuaternion(board.quaternion);
+    mInv.copy(board.matrixWorld).invert();
+  }
+  function worldToBoardLocal(pWorld, out){
+    return out.copy(pWorld).applyMatrix4(mInv);
+  }
+
+  // Collision with board top, with real hole
+  function handleBoardCollision(bag, dt){
+    const pLocal = worldToBoardLocal(bag.mesh.position, tmpA);
+    const halfW = boardW * 0.5;
+    const halfL = boardL * 0.5;
+    const topY  = boardH * 0.5;
+
+    const withinBoard =
+      Math.abs(pLocal.x) <= halfW &&
+      Math.abs(pLocal.z) <= halfL;
+
+    if (!withinBoard) return;
+
+    // Hole test (slight bias) + require motion into board (downwards along normal)
+    const dx = pLocal.x - holeLocal.x;
+    const dz = pLocal.z - holeLocal.z;
+    const inHoleAperture = (dx*dx + dz*dz) <= (holeRadius*holeRadius*1.05);
+    const movingDownTowardBoard = bag.vel.dot(boardNormal) < -0.05;
+
+    if (pLocal.y <= topY){
+      if (inHoleAperture && movingDownTowardBoard){
+        // Sunk: remove and score
+        bag.alive = false;
+        root.remove(bag.mesh);
+        bag.mesh.geometry.dispose();
+        bag.mesh.material.dispose();
+        bag.mesh = null;
+
+        score += 3;
+        updateLabel();
+        return;
       }
 
-      const EMPTY=0, HUMAN=1, AI=2;
-      let grid = Array(rows*cols).fill(EMPTY);
-      let current = HUMAN;
-      let gameOver = false;
-      let aiThinking = false;
+      // Resolve contact with top plane
+      // Lift to surface
+      pLocal.y = topY + 0.001;
+      bag.mesh.position.copy(pLocal.applyMatrix4(board.matrixWorld));
 
-      const status3D = makeLabel('Connect 4 vs AI. You are Red. Your turn.', { px:56, color:'#ffffff' });
-      status3D.position.set(0, 1.8, -1.4);
-      root.add(status3D);
-      const setStatus3D = t => status3D.userData.setText(t);
+      // Split velocity into normal/tangent relative to the board surface
+      const v = bag.vel;
+      const vnMag = v.dot(boardNormal);
+      const vn = boardNormal.clone().multiplyScalar(vnMag);
+      const vt = v.clone().sub(vn);
 
-      const chipGroup = new THREE.Group();
-      root.add(chipGroup);
+      const vnPost = vn.multiplyScalar(-RESTITUTION_BOARD);
+      const vtPost = vt.multiplyScalar(Math.max(0, 1 - FRICTION_BOARD * Math.max(dt, 0.016)));
 
-      const idx = (r,c)=> r*cols + c;
-      const inBounds = (r,c)=> r>=0 && r<rows && c>=0 && c<cols;
-      const copyGrid = g => g.slice();
-      function lowestEmptyRow(g,c){ for (let r=0;r<rows;r++) if (g[idx(r,c)]===EMPTY) return r; return -1; }
+      v.copy(vnPost.add(vtPost));
 
-      function makeChip(p){
-        const color = p===HUMAN ? 0xef4444 : 0xf59e0b;
-        const m = new THREE.MeshStandardMaterial({ color });
-        const g = new THREE.Mesh(new THREE.CylinderGeometry(cell*0.42, cell*0.42, 0.06, 24), m);
-        g.rotation.x = Math.PI/2;
-        g.userData.isChip = true;
-        return g;
-      }
+      if (v.lengthSq() < 0.0025) v.set(0,0,0);
+    }
+  }
 
-      function animDrop(r, c, who, onDone){
-        const chip = makeChip(who);
-        const start = new THREE.Vector3(boardCenter.x + (c - (cols-1)/2)*cell, boardCenter.y + (rows/2 + 0.8)*cell, boardCenter.z+0.03);
-        const end   = new THREE.Vector3(start.x, boardCenter.y + (r - (rows-1)/2)*cell, start.z);
-        chip.position.copy(start);
-        chipGroup.add(chip);
-        const t0=performance.now(), dur=350;
-        function anim(now){
-          const t = Math.min(1,(now-t0)/dur);
-          const e = 1 - Math.pow(1-t,3);
-          chip.position.lerpVectors(start,end,e);
-          if (t<1) requestAnimationFrame(anim);
-          else { onDone && onDone(chip); }
-        }
-        requestAnimationFrame(anim);
-        hapticBoth(0.4,60);
-      }
+  function bagStep(dt, b){
+    if (!b.alive) return;
 
-      function checkFrom(g,r,c,p){
-        const dirs = [[1,0],[0,1],[1,1],[1,-1]];
-        for (const [dr,dc] of dirs){
-          const cells = [[r,c]];
-          let rr=r+dr, cc=c+dc;
-          while (inBounds(rr,cc) && g[idx(rr,cc)]===p){ cells.push([rr,cc]); rr+=dr; cc+=dc; }
-          rr=r-dr; cc=c-dc;
-          while (inBounds(rr,cc) && g[idx(rr,cc)]===p){ cells.unshift([rr,cc]); rr-=dr; cc-=dc; }
-          if (cells.length>=4) return cells.slice(0,4);
-        }
-        return null;
-      }
-      function checkAnyWin(g){
-        for (let r=0;r<rows;r++) for (let c=0;c<cols;c++){
-          const p = g[idx(r,c)];
-          if (p===EMPTY) continue;
-          const w = checkFrom(g,r,c,p);
-          if (w) return {player:p, cells:w};
-        }
-        return null;
-      }
-      function drawWinRings(cells){
-        const g = new THREE.Group();
-        cells.forEach(([r,c])=>{
-          const h = new THREE.Mesh(new THREE.RingGeometry(cell*0.46, cell*0.5, 24), new THREE.MeshBasicMaterial({ color:0xfbbf24 }));
-          h.position.set(boardCenter.x + (c - (cols-1)/2)*cell, boardCenter.y + (r - (rows-1)/2)*cell, boardCenter.z+0.04);
-          g.add(h);
-        });
-        root.add(g);
-      }
-      function checkEnd(g){
-        const result = checkAnyWin(g);
-        if (result){
-          drawWinRings(result.cells);
-          setStatus3D(`Winner: ${result.player===HUMAN ? 'You' : 'AI'}`);
-          gameOver = true; hapticBoth(0.8,180);
-          return true;
-        }
-        if (!g.includes(EMPTY)){ setStatus3D('Draw'); gameOver = true; return true; }
-        return false;
-      }
+    // Air drag
+    b.vel.multiplyScalar(Math.max(0, 1 - AIR_DRAG*dt));
 
-      function humanPlay(c){
-        if (gameOver || aiThinking || current!==HUMAN) return;
-        const r = lowestEmptyRow(grid, c);
-        if (r<0){ setStatus3D('Column full. Choose another.'); return; }
-        animDrop(r, c, HUMAN, ()=>{
-          grid[idx(r,c)] = HUMAN;
-          if (checkEnd(grid)) return;
-          current = AI;
-          setStatus3D('AI thinking...');
-          aiTurn();
-        });
-      }
+    // Integrate
+    b.vel.addScaledVector(gravity, dt);
+    b.mesh.position.addScaledVector(b.vel, dt);
 
-      function legalMoves(g){ const ms=[]; for (let c=0;c<cols;c++) if (lowestEmptyRow(g,c)>=0) ms.push(c); return ms; }
-      function patternScore(g, player){
-        let total = 0;
-        function windowScore(r0,c0,dr,dc){
-          let p=0, h=0;
-          for (let k=0;k<4;k++){
-            const r=r0+dr*k, c=c0+dc*k;
-            const v = g[idx(r,c)];
-            if (v===player) p++;
-            else if (v===EMPTY) h++;
-            else return 0;
-          }
-          if (p===3 && h===1) return 50;
-          if (p===2 && h===2) return 10;
-          if (p===1 && h===3) return 2;
-          return 0;
-        }
-        for (let r=0;r<rows;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,0,1);
-        for (let c=0;c<cols;c++) for (let r=0;r<=rows-4;r++) total += windowScore(r,c,1,0);
-        for (let r=0;r<=rows-4;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,1,1);
-        for (let r=3;r<rows;r++) for (let c=0;c<=cols-4;c++) total += windowScore(r,c,-1,1);
-        return total;
-      }
-      function evaluateMove(g, c, depth){
-        const r = lowestEmptyRow(g,c); if (r<0) return -1e9;
-        const g2 = copyGrid(g); g2[idx(r,c)] = AI;
-        const winNow = checkAnyWin(g2);
-        if (winNow && winNow.player===AI) return 1e6;
-        let score = patternScore(g2, AI) - 0.9*patternScore(g2, HUMAN);
-        const centerBias = [3,2,4,1,5,0,6];
-        score += (6 - centerBias.indexOf(c)) * 8;
-        if (depth > 0){
-          let worst = 1e9;
-          for (const c2 of legalMoves(g2)){
-            const r2 = lowestEmptyRow(g2,c2);
-            const g3 = copyGrid(g2); g3[idx(r2,c2)] = HUMAN;
-            const w = checkAnyWin(g3);
-            const sc = w && w.player===HUMAN ? -1e6 : (patternScore(g3, AI) - patternScore(g3, HUMAN));
-            worst = Math.min(worst, sc);
-          }
-          score += 0.6 * worst;
-        }
-        return score;
-      }
-      function chooseAiMove(g){
-        const moves = legalMoves(g);
-        if (moves.length===0) return null;
-        for (const c of moves){
-          const r = lowestEmptyRow(g,c); const g2 = copyGrid(g); g2[idx(r,c)] = AI;
-          if (checkAnyWin(g2)?.player===AI) return c;
-        }
-        for (const c of moves){
-          const r = lowestEmptyRow(g,c); const g2 = copyGrid(g); g2[idx(r,c)] = HUMAN;
-          if (checkAnyWin(g2)?.player===HUMAN) return c;
-        }
-        let bestC = moves[0], bestS = -1e9;
-        for (const c of moves){
-          const s = evaluateMove(g,c,2);
-          if (s > bestS){ bestS = s; bestC = c; }
-        }
-        return bestC;
-      }
-      function aiTurn(){
-        aiThinking = true;
-        setTimeout(()=>{
-          if (gameOver){ aiThinking=false; return; }
-          const c = chooseAiMove(grid);
-          if (c==null){ aiThinking=false; return; }
-          const r = lowestEmptyRow(grid, c);
-          if (r<0){ aiThinking=false; current=HUMAN; setStatus3D('Your turn.'); return; }
-          animDrop(r, c, AI, ()=>{
-            grid[idx(r,c)] = AI;
-            if (checkEnd(grid)){ aiThinking=false; return; }
-            current=HUMAN; aiThinking=false; setStatus3D('Your turn.');
-          });
-        }, 450);
-      }
+    // Ground plane
+    if (b.mesh && b.mesh.position.y < 0.03){
+      b.mesh.position.y = 0.03;
 
-      // Reset + Hub
-      const resetBtn = new THREE.Group();
-      const rb = new THREE.Mesh(new THREE.PlaneGeometry(0.36,0.16), new THREE.MeshStandardMaterial({ color:0x374151 }));
-      const rl = makeLabel('Reset', { px:40, color:'#ffffff' }); rl.position.set(0,0,0.01);
-      const rh = new THREE.Mesh(new THREE.PlaneGeometry(0.38,0.18), new THREE.MeshBasicMaterial({ transparent:true, opacity:0.0 }));
-      elevateHit(rh);
-      rh.userData.onClick = ()=>{ grid.fill(EMPTY); chipGroup.clear(); gameOver=false; current=HUMAN; aiThinking=false; setStatus3D('Connect 4 vs AI. You are Red. Your turn.'); };
-      resetBtn.position.set(0, 2.05, -1.4);
-      resetBtn.add(rb, rl, rh);
-      root.add(resetBtn);
-      clickables.add(rh);
+      // Split vs world up for ground friction
+      const up = tmpC.set(0,1,0);
+      const vnMag = b.vel.dot(up);
+      const vn = up.clone().multiplyScalar(vnMag);
+      const vt = b.vel.clone().sub(vn);
 
-      addHubButton(root, new THREE.Vector3(0, 2.25, -1.4));
+      b.vel.copy(
+        vn.multiplyScalar(-RESTITUTION_GROUND)
+          .add(vt.multiplyScalar(1 - FRICTION_GROUND))
+      );
 
-      setStatus('Connect 4 vs AI. Red is human, Yellow is AI.');
-      setHelp('Point at a column and press trigger. Four in a row wins.');
-
-      tick = null;
+      if (Math.abs(b.vel.y) < 0.2) b.vel.y = 0;
     }
 
-    // ---------- Game 3: Cornhole ----------
-    function startCornhole(){
-      clearActive();
-      const root = activeRoot = new THREE.Group();
-      scene.add(root);
+    // Board collision
+    handleBoardCollision(b, dt);
+  }
 
-      setStatus('Cornhole. Toss bags with the trigger.');
-      setHelp('Aim the controller. Press and hold grip to charge; release to throw. Ten bags total. 3 points in hole, 1 point on board.');
+  function finalBoardPoints(){
+    // Count 1 point for each bag resting on top (not sunk), within board footprint.
+    const halfW = boardW * 0.5;
+    const halfL = boardL * 0.5;
+    let onBoard = 0;
 
-      const boardPos = new THREE.Vector3(0, 0.5, -2.6);
-      const board = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.05, 2.2), new THREE.MeshStandardMaterial({ color:0x374151 }));
-      board.position.copy(boardPos);
-      board.rotation.x = -Math.atan2(0.5, 2.2);
-      root.add(board);
+    for (const b of activeBags){
+      if (!b.alive || !b.mesh) continue;
+      const local = worldToBoardLocal(b.mesh.position, tmpC);
 
-      const hole = new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.12,0.06,32), new THREE.MeshStandardMaterial({ color:0x111827 }));
-      hole.position.copy(boardPos.clone().add(new THREE.Vector3(0,0.03,-0.6)));
-      root.add(hole);
+      const withinBoard =
+        Math.abs(local.x) <= halfW &&
+        Math.abs(local.z) <= halfL;
 
-      let shots = 10, score = 0;
-      const label = makeLabel(`Bags left: ${shots}   Score: ${score}`, { px:56, color:'#ffffff' });
-      label.position.set(0, 1.8, -1.6);
-      root.add(label);
-      const updateLabel = ()=> label.userData.setText(`Bags left: ${shots}   Score: ${score}`);
+      const dx = local.x - holeLocal.x;
+      const dz = local.z - holeLocal.z;
+      const inHole = (dx*dx + dz*dz) <= (holeRadius*holeRadius);
 
-      const activeBags = [];
-      const gravity = new THREE.Vector3(0,-9.8,0);
-
-      function spawnBag(worldPos, worldDir, power){
-        const bag = new THREE.Mesh(new THREE.BoxGeometry(0.16,0.06,0.16), new THREE.MeshStandardMaterial({ color:0x2563eb }));
-        bag.position.copy(worldPos);
-        root.add(bag);
-        const vel = worldDir.clone().normalize().multiplyScalar(4.5 + power*3.5);
-        vel.y += 2.2 + power*1.3;
-        activeBags.push({mesh:bag, vel, alive:true});
+      // Close to the top plane, inside the rectangle, not in hole
+      if (withinBoard && !inHole && Math.abs(local.y - boardH*0.5) < 0.09){
+        onBoard += 1;
       }
-
-      let holding = false;
-      let holdStart = 0;
-      let preview = null;
-
-      function beginHold(ctrl){
-        holding = true; holdStart = performance.now();
-        preview = new THREE.Mesh(new THREE.RingGeometry(0.02,0.03,24), new THREE.MeshBasicMaterial({ color:0xffffff }));
-        root.add(preview);
-      }
-      function endHold(ctrl){
-        if (!holding) return;
-        holding = false;
-        if (preview){ root.remove(preview); preview.geometry.dispose(); preview=null; }
-        if (shots<=0) return;
-        ctrl.getWorldPosition(tmpA);
-        ctrl.getWorldDirection(tmpB);
-        const power = Math.min(1, (performance.now()-holdStart)/1200);
-        spawnBag(tmpA, tmpB, power);
-        shots -= 1; updateLabel();
-        haptic(ctrl, 0.5+0.3*power, 90);
-      }
-
-      // hook into unified handler
-      activeRoot.userData.onSqueezeStart = (ctrl)=> beginHold(ctrl);
-      activeRoot.userData.onSqueezeEnd   = (ctrl)=> endHold(ctrl);
-
-      addHubButton(root, new THREE.Vector3(0, 2.05, -1.6));
-
-      function boardPlane(){
-        const n = new THREE.Vector3(0,1,0);
-        n.applyQuaternion(board.quaternion);
-        const p0 = board.position.clone();
-        return {n, p0};
-      }
-      const holeWorld = hole.position.clone();
-      const holeR = 0.12;
-
-      function bagStep(dt, b){
-        if (!b.alive) return;
-        b.vel.addScaledVector(gravity, dt);
-        b.mesh.position.addScaledVector(b.vel, dt);
-
-        if (b.mesh.position.y < 0.03){
-          b.mesh.position.y = 0.03;
-          b.vel.y *= -0.25;
-          b.vel.multiplyScalar(0.8);
-          if (Math.abs(b.vel.y) < 0.2) b.vel.y = 0;
-        }
-        const {n, p0} = boardPlane();
-        const toPoint = b.mesh.position.clone().sub(p0);
-        const dist = toPoint.dot(n);
-        if (dist < 0.03 && toPoint.dot(n) < 0.03 && b.mesh.position.z < board.position.z + 1.0){
-          const vn = n.clone().multiplyScalar(b.vel.dot(n));
-          const vt = b.vel.clone().sub(vn);
-          b.vel.copy( vt.multiplyScalar(0.8).add( vn.multiplyScalar(-0.3) ) );
-          b.mesh.position.add(n.clone().multiplyScalar(0.04 - dist));
-        }
-        const d = b.mesh.position.distanceTo(holeWorld);
-        if (d < holeR*0.9 && b.mesh.position.y <= holeWorld.y + 0.04){
-          score += 3; updateLabel();
-          b.alive=false; root.remove(b.mesh); return;
-        }
-      }
-
-      function finalBoardPoints(){
-        const {n,p0} = boardPlane();
-        let onBoard = 0;
-        for (const b of activeBags){
-          if (!b.alive) continue;
-          const toPoint = b.mesh.position.clone().sub(p0);
-          const proj = toPoint.clone().sub(n.clone().multiplyScalar(toPoint.dot(n)));
-          const local = proj.applyMatrix4(new THREE.Matrix4().copy(board.matrixWorld).invert());
-          if (Math.abs(local.x) <= 0.55 && Math.abs(local.z) <= 1.1){
-            onBoard += 1;
-          }
-        }
-        score += onBoard; updateLabel();
-      }
-
-      tick = (dt)=>{
-        if (holding && preview){
-          controllers[0].ctrl.getWorldPosition(tmpA);
-          controllers[0].ctrl.getWorldDirection(tmpB);
-          preview.position.copy(tmpA.clone().add(tmpB.clone().multiplyScalar(0.6)));
-          const power = Math.min(1, (performance.now()-holdStart)/1200);
-          preview.scale.setScalar(1+power*1.2);
-        }
-        activeBags.forEach(b=>bagStep(dt,b));
-        if (shots===0 && activeBags.every(b=>!b.alive || b.vel.length()<0.05)){
-          finalBoardPoints();
-          setHelp('Round complete. Use the Hub button to return.');
-          shots = -1;
-        }
-      };
     }
+    score += onBoard;
+    updateLabel();
+  }
+
+  // Main loop hook
+  tick = (dt)=>{
+    // Keep transforms fresh before local-space math
+    board.updateWorldMatrix(true, false);
+    updateBoardFrame();
+
+    if (holding && preview && lastCtrl){
+      lastCtrl.getWorldPosition(tmpA);
+      lastCtrl.getWorldDirection(tmpB);
+      preview.position.copy(tmpA).add(tmpB.multiplyScalar(0.6));
+      const power = Math.min(1, (performance.now()-holdStart)/1200);
+      preview.scale.setScalar(1 + power*1.2);
+      if (cam) preview.quaternion.copy(cam.quaternion); // face player
+    }
+
+    activeBags.forEach(b=>bagStep(dt,b));
+
+    // End-of-round once all thrown and settled/removed
+    if (shots === 0 && activeBags.every(b=>!b.alive || !b.mesh || b.vel.length() < 0.05)){
+      finalBoardPoints();
+      setHelp('Round complete. Use the Hub button to return.');
+      shots = -1; // lock
+    }
+  };
+}
+
 
     // ---------- Desktop pointer fallback (test without headset) ----------
     const mouseFallback = ()=>{
