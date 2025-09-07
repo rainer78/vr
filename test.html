@@ -2,151 +2,100 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Three.js • Floating Clickable Cards (ESM)</title>
+  <title>A-Frame • Floating Clickable Cards</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
   <style>
-    html, body { height: 100%; margin: 0; background: #0b1020; }
-    canvas { display: block; }
+    html, body { height:100%; margin:0; background:#0b1020; }
   </style>
-
-  <!-- Load shim before the import map -->
-  <script src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.min.js"></script>
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
-    }
-  }
-  </script>
 </head>
 <body>
-<script type="module">
-  import * as THREE from "three";
+  <a-scene renderer="antialias: true; colorManagement: true" background="color: #0b1020">
+    <!-- Camera + mouse cursor -->
+    <a-entity id="rig" position="0 0 0">
+      <a-entity id="camera" camera look-controls position="0 1.6 0"></a-entity>
+      <a-entity cursor="rayOrigin: mouse"
+                raycaster="objects: .clickable; far: 10"></a-entity>
+    </a-entity>
 
-  // Scene
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color("#0b1020");
+    <!-- VR laser pointers -->
+    <a-entity laser-controls="hand: left"  raycaster="objects: .clickable; far: 10"></a-entity>
+    <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 10"></a-entity>
 
-  // Camera
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
-  camera.position.set(0, 1.2, 3);
+    <!-- Lights -->
+    <a-entity light="type: directional; color: #ffffff; intensity: 0.9" position="1 2 1"></a-entity>
+    <a-entity light="type: ambient; color: #667; intensity: 0.6"></a-entity>
 
-  // Renderer
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  document.body.appendChild(renderer.domElement);
+    <!-- Simple ground for depth -->
+    <a-plane position="0 0 -2.5" rotation="-90 0 0" width="10" height="10" color="#0a0f1f"></a-plane>
 
-  // Lights
-  scene.add(new THREE.AmbientLight(0x556677, 0.6));
-  const key = new THREE.DirectionalLight(0xffffff, 0.8);
-  key.position.set(1, 2, 1);
-  scene.add(key);
+    <!-- Card row -->
+    <a-entity id="cards" position="0 1.4 -2">
 
-  // Card factory
-  function makeCard(x, label) {
-    const group = new THREE.Group();
-    group.position.set(x, 1.2, 0);
+      <!-- Card template note:
+           Outer entity is clickable and floats.
+           Inner planes form frame + face + text image. -->
 
-    const base = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.9, 1.2),
-      new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9, metalness: 0 })
-    );
-    group.add(base);
+      <!-- Card 1 -->
+      <a-entity class="card clickable" id="card1" position="-1.1 0 0">
+        <a-plane width="0.9" height="1.2" color="#1f2937" material="roughness:0.8"></a-plane>
+        <a-plane width="0.86" height="1.16" color="#111827" position="0 0 0.01"></a-plane>
+        <a-entity position="0 0 0.02" text="value: Card One\nClick to interact; align: center; width: 1.6; color: #e5e7eb"
+                  ></a-entity>
 
-    const face = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.86, 1.16),
-      new THREE.MeshStandardMaterial({ color: 0x111827 })
-    );
-    face.position.z = 0.01;
-    face.name = "face";
-    group.add(face);
+        <!-- Float and hover animations -->
+        <a-animation attribute="position" from="-1.1 0 0" to="-1.1 0.15 0" direction="alternate" dur="1800" easing="ease-in-out" repeat="indefinite"></a-animation>
+        <a-animation attribute="scale" begin="mouseenter" to="1.06 1.06 1.06" dur="120"></a-animation>
+        <a-animation attribute="scale" begin="mouseleave" to="1 1 1" dur="120"></a-animation>
+      </a-entity>
 
-    // Text canvas
-    const canvas = document.createElement("canvas");
-    canvas.width = 256; canvas.height = 256;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#111827";
-    ctx.fillRect(0, 0, 256, 256);
-    ctx.fillStyle = "#e5e7eb";
-    ctx.font = "28px Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, 128, 110);
-    ctx.fillStyle = "#9ca3af";
-    ctx.font = "18px Arial";
-    ctx.fillText("Click to interact", 128, 150);
+      <!-- Card 2 -->
+      <a-entity class="card clickable" id="card2" position="0 0 0">
+        <a-plane width="0.9" height="1.2" color="#1f2937"></a-plane>
+        <a-plane width="0.86" height="1.16" color="#111827" position="0 0 0.01"></a-plane>
+        <a-entity position="0 0 0.02" text="value: Card Two\nClick to interact; align: center; width: 1.6; color: #e5e7eb"></a-entity>
 
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;  // correct color management
-    const textPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.84, 1.12),
-      new THREE.MeshBasicMaterial({ map: tex, transparent: true })
-    );
-    textPlane.position.z = 0.02;
-    group.add(textPlane);
+        <a-animation attribute="position" from="0 0 0" to="0 0.18 0" direction="alternate" dur="2000" easing="ease-in-out" repeat="indefinite"></a-animation>
+        <a-animation attribute="scale" begin="mouseenter" to="1.06 1.06 1.06" dur="120"></a-animation>
+        <a-animation attribute="scale" begin="mouseleave" to="1 1 1" dur="120"></a-animation>
+      </a-entity>
 
-    scene.add(group);
-    return group;
-  }
+      <!-- Card 3 -->
+      <a-entity class="card clickable" id="card3" position="1.1 0 0">
+        <a-plane width="0.9" height="1.2" color="#1f2937"></a-plane>
+        <a-plane width="0.86" height="1.16" color="#111827" position="0 0 0.01"></a-plane>
+        <a-entity position="0 0 0.02" text="value: Card Three\nClick to interact; align: center; width: 1.6; color: #e5e7eb"></a-entity>
 
-  const cards = [
-    makeCard(-1.1, "Card One"),
-    makeCard(0.0,  "Card Two"),
-    makeCard(1.1,  "Card Three")
-  ];
+        <a-animation attribute="position" from="1.1 0 0" to="1.1 0.15 0" direction="alternate" dur="1700" easing="ease-in-out" repeat="indefinite"></a-animation>
+        <a-animation attribute="scale" begin="mouseenter" to="1.06 1.06 1.06" dur="120"></a-animation>
+        <a-animation attribute="scale" begin="mouseleave" to="1 1 1" dur="120"></a-animation>
+      </a-entity>
+    </a-entity>
 
-  // Picking
-  const raycaster = new THREE.Raycaster();
-  const mouse = new THREE.Vector2();
-  const pickables = [];
-  cards.forEach(g => g.children.forEach(c => { if (c.isMesh) pickables.push(c); }));
+    <!-- Click handler -->
+    <script>
+      const flash = (el) => {
+        // Tint the inner face for feedback
+        const face = el.querySelector('a-plane:nth-child(2)');
+        const old = face.getAttribute('color');
+        face.setAttribute('color', '#334155');
+        setTimeout(() => face.setAttribute('color', old), 180);
+      };
 
-  window.addEventListener("pointermove", (e) => {
-    mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1;
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-  });
+      const onClick = (evt) => {
+        const id = evt.currentTarget.id || 'card';
+        flash(evt.currentTarget);
+        console.log('Clicked:', id);
+        // Wire to your game starters here:
+        // if (id === 'card1' && window.startTTTAI) startTTTAI();
+        // if (id === 'card2' && window.startC4AI)  startC4AI();
+        // if (id === 'card3' && window.startCornhole) startCornhole();
+      };
 
-  window.addEventListener("click", () => {
-    raycaster.setFromCamera(mouse, camera);
-    const hits = raycaster.intersectObjects(pickables, true);
-    if (!hits.length) return;
-    const root = hits[0].object.parent;
-    const face = root.children.find(c => c.name === "face");
-    const old = face.material.color.clone();
-    face.material.color.setHex(0x334155);
-    setTimeout(() => face.material.color.copy(old), 180);
-    console.log("Clicked:", ["Card One", "Card Two", "Card Three"][cards.indexOf(root)]);
-  });
-
-  // Animation
-  const clock = new THREE.Clock();
-  function animate() {
-    const t = clock.getElapsedTime();
-
-    cards.forEach((g, i) => {
-      g.position.y = 1.2 + Math.sin(t * (1.4 + i * 0.2)) * 0.1;
-      g.rotation.y = Math.sin(t * 0.5 + i) * 0.05;
-    });
-
-    // Hover scale
-    raycaster.setFromCamera(mouse, camera);
-    const hit = raycaster.intersectObjects(pickables, true)[0];
-    cards.forEach(g => g.scale.setScalar(1.0));
-    if (hit) hit.object.parent.scale.setScalar(1.06);
-
-    renderer.render(scene, camera);
-    requestAnimationFrame(animate);
-  }
-  animate();
-
-  // Resize
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-</script>
+      document.querySelectorAll('.clickable').forEach(el => {
+        el.addEventListener('click', onClick);
+      });
+    </script>
+  </a-scene>
 </body>
 </html>
