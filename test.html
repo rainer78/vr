@@ -10,7 +10,14 @@
   </style>
 </head>
 <body>
-  <a-scene renderer="antialias: true; colorManagement: true" background="color: #0b1020">
+  <a-scene
+  renderer="antialias: true;
+            colorManagement: true;
+            physicallyCorrectLights: true;
+            toneMapping: ACESFilmic;
+            exposure: 1.0"
+  background="color: #0b1020">
+
     <!-- Camera + mouse cursor -->
     <a-entity id="rig" position="0 0 0">
       <a-entity id="camera" camera look-controls position="0 1.6 0"></a-entity>
