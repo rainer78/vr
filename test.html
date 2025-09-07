@@ -10,7 +10,14 @@
   </style>
 </head>
 <body>
-  <a-scene renderer="antialias: true; colorManagement: true" background="color: #0b1020">
+  <a-scene
+  renderer="antialias: true;
+            colorManagement: true;
+            physicallyCorrectLights: true;
+            toneMapping: ACESFilmic;
+            exposure: 1.0"
+  background="color: #0b1020">
+
     <!-- Camera + mouse cursor -->
     <a-entity id="rig" position="0 0 0">
       <a-entity id="camera" camera look-controls position="0 1.6 0"></a-entity>
@@ -23,8 +30,8 @@
     <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 10"></a-entity>
 
     <!-- Lights -->
-    <a-entity light="type: directional; color: #ffffff; intensity: 0.9" position="1 2 1"></a-entity>
-    <a-entity light="type: ambient; color: #667; intensity: 0.6"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 0.6" position="1 2 1"></a-entity>
+<a-entity light="type: ambient; color: #667; intensity: 0.25"></a-entity>
 
     <!-- Simple ground for depth -->
     <a-plane position="0 0 -2.5" rotation="-90 0 0" width="10" height="10" color="#0a0f1f"></a-plane>
