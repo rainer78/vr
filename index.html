@@ -193,18 +193,21 @@ function isControllerOrGrip(o){
 function tryClick(origin, dir){
   raycaster.set(origin, dir.normalize());
 
-  // Look inside the active root first; fallback to whole scene
-  const roots = activeRoot ? [activeRoot] : scene.children;
-  const hits = raycaster.intersectObjects(roots, true);
+  // Raycast ONLY against explicit hit targets
+  const pool = clickables.size ? Array.from(clickables)
+                               : (activeRoot ? [activeRoot] : scene.children);
 
-   // Debug: see what the ray hits
-  console.log('tryClick hits:', hits.map(h => h.object.name || h.object.type));
+  const hits = raycaster.intersectObjects(pool, true);
 
   for (const h of hits){
+    if (isControllerOrGrip(h.object)) continue;   // ignore controller geometry
+
     const target = findClickable(h.object);
-    if (isControllerOrGrip(h.object)) continue; // skip controller and its ray
-    if (target){
-      target.userData.onClick();
+    if (!target) continue;
+
+    const fn = target.userData.onClick;
+    if (typeof fn === 'function'){
+      fn.call(target);                            // preserve `this` for handlers
       return true;
     }
   }
@@ -227,7 +230,7 @@ function hoverUpdate(){
       const obj = hits[0].object;
 
       // 🔍 Debug log
-      console.log('Hovering over:', obj.name || obj.type);
+     // console.log('Hovering over:', obj.name || obj.type);
 
       obj.parent.userData._hoverCount = (obj.parent.userData._hoverCount||0) + 1;
     }
